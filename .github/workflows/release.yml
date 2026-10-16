@@ -92,10 +92,11 @@ jobs:
         env:
           VERSION: ${{ needs.binaries.outputs.version }}
         run: |
-          mkdir pkg
+          mkdir pkg build
           for ARCH in amd64 arm64; do
+            cp "dist/netcheck-linux-$ARCH" build/netcheck
             for p in deb rpm; do
-              ARCH=$ARCH BIN=dist/netcheck-linux-$ARCH nfpm pkg --config packaging/linux/nfpm.yaml \
+              ARCH=$ARCH nfpm pkg --config packaging/linux/nfpm.yaml \
                 --packager $p --target pkg/netcheck-linux-$ARCH.$p
             done
           done

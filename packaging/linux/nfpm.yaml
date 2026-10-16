@@ -1,6 +1,6 @@
 # Linux packages (.deb and .rpm), built by the release workflow with nfpm:
-#   VERSION=0.11.0 ARCH=amd64 BIN=dist/netcheck-linux-amd64 \
-#     nfpm pkg --config packaging/linux/nfpm.yaml --packager deb --target dist/netcheck-linux-amd64.deb
+#   cp dist/netcheck-linux-amd64 build/netcheck
+#   VERSION=0.11.0 ARCH=amd64 nfpm pkg --config packaging/linux/nfpm.yaml --packager deb --target dist/netcheck-linux-amd64.deb
 name: netcheck
 arch: ${ARCH}
 platform: linux
