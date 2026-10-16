@@ -1,27 +1,36 @@
 name: Release
 
-# Push a tag like v0.3.1 (matching `version` in main.go) to publish binaries.
+# Push a tag like v0.11.0 (matching `version` in main.go) to publish the
+# binaries and installers. Run it by hand (Actions > Release > Run workflow)
+# to build everything as artifacts without publishing.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+  push:
+    branches: [installers] # TEMPORARY: test run on this branch; removed before merging
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  binaries:
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: "0"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: tag matches version in main.go
+      - name: version
+        id: version
         run: |
           want=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
-          if [ "v$want" != "$GITHUB_REF_NAME" ]; then
+          echo "version=$want" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "v$want" != "$GITHUB_REF_NAME" ]; then
             echo "tag $GITHUB_REF_NAME but main.go says $want"; exit 1
           fi
       - run: go vet ./...
@@ -35,8 +44,87 @@ jobs:
             [ "$os" = windows ] && ext=.exe
             GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "dist/netcheck-$name-$arch$ext" .
           done
-          cd dist && sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/
+
+  windows-msi:
+    needs: binaries
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist
+      - name: install WiX
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: build MSIs
+        shell: pwsh
+        run: |
+          $v = '${{ needs.binaries.outputs.version }}'
+          foreach ($a in @(@('x64', 'amd64'), @('arm64', 'arm64'))) {
+            wix build -arch $a[0] -d "Version=$v" -d "Bin=dist\netcheck-windows-$($a[1]).exe" `
+              packaging\windows\netcheck.wxs -o "msi\netcheck-windows-$($a[1]).msi"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Remove-Item msi\*.wixpdb -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi
+          path: msi/*.msi
+
+  linux-packages:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist
+      - name: install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
+      - name: build .deb and .rpm
+        env:
+          VERSION: ${{ needs.binaries.outputs.version }}
+        run: |
+          mkdir pkg
+          for ARCH in amd64 arm64; do
+            for p in deb rpm; do
+              ARCH=$ARCH BIN=dist/netcheck-linux-$ARCH nfpm pkg --config packaging/linux/nfpm.yaml \
+                --packager $p --target pkg/netcheck-linux-$ARCH.$p
+            done
+          done
+          ls -l pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: pkg/
+
+  publish:
+    needs: [binaries, windows-msi, linux-packages]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    env:
+      REFRESH_URL: ${{ secrets.DOWNLOADS_REFRESH_URL }}
+      REFRESH_SECRET: ${{ secrets.DOWNLOADS_REFRESH_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "netcheck $GITHUB_REF_NAME"
+      - name: tell the download site
+        if: env.REFRESH_URL != ''
+        run: curl -fsS -X POST -H "X-Refresh-Secret: $REFRESH_SECRET" "$REFRESH_URL" || echo "refresh failed; the daily run will pick the release up"
