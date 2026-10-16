@@ -6,7 +6,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-    branches: [installers] # TEMPORARY: test run on this branch; removed before merging
   workflow_dispatch:
 
 permissions:
