@@ -85,6 +85,12 @@ Both scripts are short; read them first if you like:
 `NETCHECK_VERSION=v0.9.0` picks a release, and on macOS and Linux
 `NETCHECK_INSTALL_DIR` picks the folder.
 
+Prefer an installer? Every release also has a Windows `.msi` (x64 and
+ARM64; installs for you only, no admin rights, removable from Settings >
+Apps) and Linux `.deb` and `.rpm` packages (amd64 and arm64; netcheck goes
+to `/usr/bin`), on [Releases](https://github.com/tworjaga/netcheck/releases)
+and at [download.alexeysaltaganov.com](https://download.alexeysaltaganov.com/).
+
 Or download the binary from
 [Releases](https://github.com/tworjaga/netcheck/releases) (or
 [build it](#build)) and put it on your PATH yourself:

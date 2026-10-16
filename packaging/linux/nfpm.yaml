@@ -1,0 +1,25 @@
+# Linux packages (.deb and .rpm), built by the release workflow with nfpm:
+#   cp dist/netcheck-linux-amd64 build/netcheck
+#   VERSION=0.11.0 ARCH=amd64 nfpm pkg --config packaging/linux/nfpm.yaml --packager deb --target dist/netcheck-linux-amd64.deb
+name: netcheck
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: Alexey Saltaganov <me@alexeysaltaganov.com>
+description: |
+  Quiet home-network diagnostics in one small binary.
+  Finds what's wrong with Wi-Fi, latency, DNS, speed and bufferbloat,
+  CGNAT, routes and more, and says it in plain English.
+homepage: https://github.com/tworjaga/netcheck
+license: MIT
+contents:
+  - src: build/netcheck
+    dst: /usr/bin/netcheck
+    file_info:
+      mode: 0755
+  - src: LICENSE
+    dst: /usr/share/doc/netcheck/LICENSE
+    file_info:
+      mode: 0644
