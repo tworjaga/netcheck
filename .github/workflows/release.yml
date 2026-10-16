@@ -6,9 +6,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-  push:
     branches: [installers] # TEMPORARY: test run on this branch; removed before merging
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -128,4 +127,5 @@ jobs:
       - name: tell the download site
         if: env.REFRESH_URL != ''
         run: |
-          curl -fsS -X POST -H "X-Refresh-Secret: $REFRESH_SECRET" "$REFRESH_URL"             || echo "refresh failed; the daily run will pick the release up"
+          curl -fsS -X POST -H "X-Refresh-Secret: $REFRESH_SECRET" "$REFRESH_URL" \
+            || echo "refresh failed; the daily run will pick the release up"
