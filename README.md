@@ -47,6 +47,8 @@ One small binary · no installer · no admin rights for almost everything · no 
   │     ask your ISP for one, or use IPv6.                                             │
   ╰────────────────────────────────────────────────────────────────────────────────────╯
 ```
+<div align="center">
+<a href="https://deepwiki.com/tworjaga/netcheck"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 
 ## What it finds
 
