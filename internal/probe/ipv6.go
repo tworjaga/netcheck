@@ -38,7 +38,7 @@ var (
 			}
 		}
 		return nil
-	}AC
+	}
 )
 
 // isULA reports fc00::/7, which is private and can't reach the internet.
