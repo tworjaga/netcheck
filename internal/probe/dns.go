@@ -3,181 +3,178 @@ package probe
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
+	"os"
+	"sort"
+	"strings"
 	"time"
 )
 
-// DHCPServer is one server that answered a DHCPDISCOVER.
-type DHCPServer struct {
-	ServerID string   `json:"server_id"`            // option 54, else the sender
-	Offered  string   `json:"offered_ip,omitempty"` // the address it would lease
-	Router   string   `json:"router,omitempty"`     // option 3
-	DNS      []string `json:"dns,omitempty"`        // option 6
+// Resolver is a DNS server to test. An empty Addr means the OS default
+// resolver (used when the system's nameservers can't be read).
+type Resolver struct {
+	Label string `json:"label"`
+	Addr  string `json:"addr"`
+	Port  string `json:"-"` // defaults to 53; overridable for tests
 }
 
-// DHCPResult lists every DHCP server that offered an address.
-type DHCPResult struct {
-	Servers []DHCPServer `json:"servers"`
-	// Unavailable is set when the DHCP client port couldn't be opened:
-	// it needs administrator rights, or the system's DHCP client holds it.
-	Unavailable string `json:"unavailable,omitempty"`
-	Error       string `json:"error,omitempty"`
+// DNSResult is the outcome of testing one resolver.
+type DNSResult struct {
+	Label      string  `ACjson:"label"`
+	Addr       string  `json:"addr"`
+	Lookups    int     `json:"lookups"`
+	Answered   int     `json:"answered"`
+	MedianMs   float64 `json:"median_ms"`
+	RewritesNX bool    `json:"rewrites_nxdomain"`
+	Error      string  `json:"error,omitempty"`
 }
 
-var dhcpMagic = []byte{99, 130, 83, 99}
+// DefaultNames are looked up to measure resolver latency.
+var DefaultNames = []string{"example.com.", "cloudflare.com.", "wikipedia.org."}
 
-// buildDiscover makes a DHCPDISCOVER with the broadcast flag set, so
-// servers answer to 255.255.255.255 rather than an address we don't have.
-func buildDiscover(xid uint32, mac net.HardwareAddr) []byte {
-	p := make([]byte, 240, 300)
-	p[0], p[1], p[2] = 1, 1, 6 // BOOTREQUEST, Ethernet, 6-byte MAC
-	binary.BigEndian.PutUint32(p[4:], xid)
-	binary.BigEndian.PutUint16(p[10:], 0x8000) // broadcast flag
-	copy(p[28:], mac)
-	copy(p[236:], dhcpMagic)
-	p = append(p, 53, 1, 1)       // DHCP message type: DISCOVER
-	p = append(p, 55, 3, 1, 3, 6) // ask for subnet, router, DNS
-	p = append(p, 61, 7, 1)       // client identifier: type 1 + MAC
-	p = append(p, mac[:6]...)
-	return append(p, 255)
-}
-
-// parseOffer reads a DHCPOFFER for xid. ok is false for anything else.
-func parseOffer(b []byte, xid uint32, from net.IP) (DHCPServer, bool) {
-	if len(b) < 240 || b[0] != 2 || binary.BigEndian.Uint32(b[4:]) != xid || string(b[236:240]) != string(dhcpMagic) {
-		return DHCPServer{}, false
+func (r Resolver) resolver() *net.Resolver {
+	if r.Addr == "" {
+		return net.DefaultResolver
 	}
-	s := DHCPServer{Offered: net.IP(b[16:20]).String()}
-	msgType := 0
-	for i := 240; i < len(b); {
-		code := b[i]
-		if code == 255 {
-			break
+	port := r.Port
+	if port == "" {
+		port = "53"
+	}
+	target := net.JoinHostPort(r.Addr, port)
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 2 * time.Second}
+			return d.DialContext(ctx, network, target)
+		},
+	}
+}
+
+// SystemNameservers reads the nameservers the OS is configured to use
+// (Linux and macOS; empty elsewhere).
+func SystemNameservers() []string {
+	b, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 && f[0] == "nameserver" {
+			out = append(out, f[1])
 		}
-		if code == 0 {
-			i++
+	}
+	return out
+}
+
+// BuildResolvers returns the system resolver first, then well-known public
+// ones to compare it against.
+func BuildResolvers(gw net.IP) []Resolver {
+	var out []Resolver
+	seen := map[string]bool{}
+	if ns := SystemNameservers(); len(ns) > 0 {
+		label := "System"
+		if gw != nil && ns[0] == gw.String() {
+			label = "Router"
+		}
+		out = append(out, Resolver{Label: label, Addr: ns[0]})
+		seen[ns[0]] = true
+	} else {
+		out = append(out, Resolver{Label: "System"})
+	}
+	for _, p := range []Resolver{
+		{Label: "Cloudflare", Addr: "1.1.1.1"},
+		{Label: "Google", Addr: "8.8.8.8"},
+		{Label: "Quad9", Addr: "9.9.9.9"},
+	} {
+		if !seen[p.Addr] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func randomName() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "nx" + hex.EncodeToString(b) + ".com."
+}
+
+func shortErr(err error) string {
+	var de *net.DNSError
+	if errors.As(err, &de) {
+		switch {
+		case de.IsTimeout:
+			return "timed out"
+		case de.IsNotFound:
+			return "no such domain"
+		}
+	}
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "timeout"):
+		return "timed out"
+	case strings.Contains(s, "refused"):
+		return "connection refused"
+	case strings.Contains(s, "unreachable"):
+		return "unreachable"
+	}
+	return "no answer"
+}
+
+// systemLookup, where set, resolves through the OS's DNS servers without its
+// cache (Windows). It reports whether the name has an IPv4 address.
+var systemLookup func(ctx context.Context, name string) (bool, error)
+
+// CheckResolver looks up names against r, measures the median latency, and
+// checks whether it rewrites NXDOMAIN answers (a sign of ISP ad redirects).
+func CheckResolver(ctx context.Context, r Resolver, names []string) DNSResult {
+	res := DNSResult{Label: r.Label, Addr: r.Addr, Lookups: len(names)}
+	rs := r.resolver()
+	lookup := func(c context.Context, n string) (bool, error) {
+		ips, err := rs.LookupIP(c, "ip4", n)
+		return err == nil && len(ips) > 0, err
+	}
+	if r.Addr == "" && systemLookup != nil {
+		lookup = systemLookup
+	}
+	var times []float64
+	var lastErr error
+	fails := 0
+
+	for _, n := range names {
+		c, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+		start := time.Now()
+		ok, err := lookup(c, n)
+		el := time.Since(start)
+		cancel()
+		if ok {
+			times = append(times, float64(el.Microseconds())/1000)
+			res.Answered++
 			continue
 		}
-		if i+1 >= len(b) || i+2+int(b[i+1]) > len(b) {
-			break
-		}
-		v := b[i+2 : i+2+int(b[i+1])]
-		switch code {
-		case 53:
-			if len(v) == 1 {
-				msgType = int(v[0])
-			}
-		case 54:
-			if len(v) == 4 {
-				s.ServerID = net.IP(v).String()
-			}
-		case 3:
-			if len(v) >= 4 {
-				s.Router = net.IP(v[:4]).String()
-			}
-		case 6:
-			for j := 0; j+4 <= len(v); j += 4 {
-				s.DNS = append(s.DNS, net.IP(v[j:j+4]).String())
-			}
-		}
-		i += 2 + len(v)
-	}
-	if msgType != 2 { // OFFER
-		return DHCPServer{}, false
-	}
-	if s.ServerID == "" && from != nil {
-		s.ServerID = from.String()
-	}
-	return s, true
-}
-
-// errNeedsElevation is reported when port 68 can't be bound.
-var errNeedsElevation = errors.New("port 68 unavailable")
-
-// dhcpExchange is a test seam: broadcast pkt from port 68 and collect
-// every datagram that arrives within wait.
-var dhcpExchange = func(ctx context.Context, pkt []byte, wait time.Duration) ([]dhcpReply, error) {
-	c, err := net.ListenPacket("udp4", ":68")
-	if err != nil {
-		// EACCES/EPERM without root on Unix, EADDRINUSE (or Windows' own
-		// WSAEACCES) when the system DHCP client holds the port. Every bind
-		// failure here comes down to one of those.
-		return nil, errNeedsElevation
-	}
-	defer c.Close()
-	if _, err := c.WriteTo(pkt, &net.UDPAddr{IP: net.IPv4bcast, Port: 67}); err != nil {
-		return nil, err
-	}
-	deadline := time.Now().Add(wait)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
-	}
-	_ = c.SetReadDeadline(deadline)
-	var out []dhcpReply
-	buf := make([]byte, 1500)
-	for ctx.Err() == nil {
-		n, addr, err := c.ReadFrom(buf)
-		if err != nil {
-			break // deadline reached
-		}
-		var from net.IP
-		if u, ok := addr.(*net.UDPAddr); ok {
-			from = u.IP
-		}
-		out = append(out, dhcpReply{append([]byte(nil), buf[:n]...), from})
-	}
-	return out, nil
-}
-
-type dhcpReply struct {
-	b    []byte
-	from net.IP
-}
-
-// hardwareAddr finds the MAC of the interface carrying the default route,
-// or makes up a locally administered one.
-func hardwareAddr() net.HardwareAddr {
-	if local := LocalIP(); local != nil {
-		ifs, _ := net.Interfaces()
-		for _, i := range ifs {
-			addrs, _ := i.Addrs()
-			for _, a := range addrs {
-				if n, ok := a.(*net.IPNet); ok && n.IP.Equal(local) && len(i.HardwareAddr) == 6 {
-					return i.HardwareAddr
-				}
-			}
+		lastErr = err
+		if fails++; fails >= 2 && res.Answered == 0 {
+			break // dead resolver: don't wait out every timeout
 		}
 	}
-	m := make(net.HardwareAddr, 6)
-	_, _ = rand.Read(m)
-	m[0] = m[0]&0xfe | 0x02
-	return m
-}
-
-// FindDHCPServers broadcasts one DHCPDISCOVER and lists the servers that
-// offer an address. Nothing is accepted, so no lease is taken.
-func FindDHCPServers(ctx context.Context, wait time.Duration) DHCPResult {
-	res := DHCPResult{Servers: []DHCPServer{}}
-	var xb [4]byte
-	_, _ = rand.Read(xb[:])
-	xid := binary.BigEndian.Uint32(xb[:])
-	replies, err := dhcpExchange(ctx, buildDiscover(xid, hardwareAddr()), wait)
-	switch {
-	case errors.Is(err, errNeedsElevation):
-		res.Unavailable = "needs administrator rights (or the system's DHCP client is using port 68)"
-		return res
-	case err != nil:
-		res.Error = shortErr(err)
+	if res.Answered == 0 {
+		if lastErr != nil {
+			res.Error = shortErr(lastErr)
+		} else {
+			res.Error = "no answer"
+		}
 		return res
 	}
-	seen := map[string]bool{}
-	for _, r := range replies {
-		if s, ok := parseOffer(r.b, xid, r.from); ok && !seen[s.ServerID] {
-			seen[s.ServerID] = true
-			res.Servers = append(res.Servers, s)
-		}
+	sort.Float64s(times)
+	res.MedianMs = times[len(times)/2]
+
+	c, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+	if ok, _ := lookup(c, randomName()); ok {
+		res.RewritesNX = true
 	}
 	return res
 }
